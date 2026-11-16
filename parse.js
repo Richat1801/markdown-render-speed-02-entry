@@ -2014,71 +2014,72 @@ function htmlBlockType(first) {
   return { type, closeTag };
 }
 
-// Consume an HTML block whose first (already container-stripped) line is
-// `first`. getLine(j) returns the stripped line j (or null when it does not
-// belong to the current containers); rawLineAt(j) is the raw source line.
-// Returns {text, next} where next is the index of the first line after the
-// block, or null when no HTML block starts.
+// Gather an HTML block starting at the (already container-stripped)
+// line `first`. getLine(j) gives the stripped line j, or null when it
+// falls outside the current containers; rawLineAt(j) is the raw source
+// line. The result is {text, next} with next the first line past the
+// block, or null when no HTML block starts here.
 //
-// Line gathering: the first continuation line must match the containers.
-// Once at least one continuation line has been taken, a later line that
-// does not match the containers is still taken when it is a lazy line
-// (not blank, not starting a block), used verbatim. Types 6/7 end at the
-// first blank line; types 1-5 end at their closing marker (which may be
-// on the first line).
-// Trailing newline: the text gets one trailing "\n" unless the block
-// ended at a blank line, ended because the next line does not belong to
-// the containers, or ended at EOF without a trailing newline in the input.
+// Gathering: a continuation line must belong to the containers at first.
+// After at least one continuation line is in, a line outside the
+// containers may still join as a lazy line (not blank, not opening a
+// block), taken verbatim. Types 6/7 stop at the first blank line; types
+// 1-5 stop at their closing marker, which may sit on the first line.
+// The text keeps one trailing "\n" unless the block stopped at a blank
+// line, stopped because the next line left the containers, or hit EOF
+// with no trailing newline in the input.
 function consumeHtmlBlock(first, getLine, rawLineAt, li, total, endsWithNewline) {
   const info = htmlBlockType(first);
   if (!info) return null;
   const kind = info.type;
-  const closeTag = kind === 1 ? new RegExp('</' + info.closeTag + '>', 'i') : null;
-  const finishes = (line) => {
-    if (kind === 1) return closeTag.test(line);
-    if (kind === 2) return line.indexOf('-->') >= 0;
-    if (kind === 3) return line.indexOf('?>') >= 0;
-    if (kind === 4) return line.indexOf('>') >= 0;
-    if (kind === 5) return line.indexOf(']]>') >= 0;
-    return false;
+  const closeRe = kind === 1 ? new RegExp('</' + info.closeTag + '>', 'i') : null;
+  const closedBy = (line) => {
+    switch (kind) {
+      case 1: return closeRe.test(line);
+      case 2: return line.indexOf('-->') >= 0;
+      case 3: return line.indexOf('?>') >= 0;
+      case 4: return line.indexOf('>') >= 0;
+      case 5: return line.indexOf(']]>') >= 0;
+      default: return false;
+    }
   };
-  const chunks = [first];
-  let cursor = li + 1;
-  const doneOnFirst = kind <= 5 && finishes(first);
-  while (!doneOnFirst && cursor < total) {
-    const stripped = getLine(cursor);
+  const parts = [first];
+  let pos = li + 1;
+  const closedAtStart = kind <= 5 && closedBy(first);
+  while (!closedAtStart && pos < total) {
+    const stripped = getLine(pos);
     if (stripped !== null) {
       if (kind >= 6 && isBlankLine(stripped)) break;
-      chunks.push(stripped);
-      cursor += 1;
-      if (kind <= 5 && finishes(stripped)) break;
+      parts.push(stripped);
+      pos += 1;
+      if (kind <= 5 && closedBy(stripped)) break;
       continue;
     }
     // A line outside the containers can only join as a lazy line, and
-    // only after the block already has a continuation line.
-    if (chunks.length < 2) break;
-    const raw = rawLineAt(cursor);
+    // only once the block already has a continuation line.
+    if (parts.length < 2) break;
+    const raw = rawLineAt(pos);
     if (!isLazyLine(raw)) break;
-    chunks.push(raw);
-    cursor += 1;
-    if (kind <= 5 && finishes(raw)) break;
+    parts.push(raw);
+    pos += 1;
+    if (kind <= 5 && closedBy(raw)) break;
   }
-  let retainEnding;
-  if (cursor >= total) {
-    retainEnding = endsWithNewline;
+  let keepNewline;
+  if (pos >= total) {
+    keepNewline = endsWithNewline;
   } else {
-    const following = getLine(cursor);
-    // marked keeps a single trailing newline and drops a run of two or
-    // more. For types 1-5 the following run is one newline plus the run
-    // of genuinely empty lines after the block — a whitespace-only line
-    // (say a lone tab) interrupts that run, so the newline is kept. For
-    // types 6/7 the block already ends at a blank line, so any
-    // blank-looking next line, whitespace-only included, drops it.
-    retainEnding = following !== null && (kind <= 5 ? following !== '' : !isBlankLine(following));
+    const next = getLine(pos);
+    // Marked keeps one trailing newline and drops a run of two or more.
+    // For types 1-5 the run after the block is one newline plus the run
+    // of genuinely empty lines — a whitespace-only line (a lone tab,
+    // say) breaks that run, so the newline survives. Types 6/7 already
+    // end at a blank line, so any blank-looking next line, a
+    // whitespace-only one included, drops it.
+    keepNewline = next !== null && (kind <= 5 ? next !== '' : !isBlankLine(next));
   }
-  let text = chunks.join('\n');
-  if (retainEnding) text += '\n';
-  return { text, next: cursor };
+  let text = parts.join('\n');
+  if (keepNewline) text += '\n';
+  return { text, next: pos };
 }
 
 // Consume a fenced code block. `fence` was matched on the first line;
@@ -2097,13 +2098,13 @@ function consumeFence(fence, getLine, rawLineAt, li, total, inQuote) {
     const stripped = getLine(at);
     if (stripped !== null) {
       if (closer.test(stripped)) { sealed = true; break; }
-      // Only backtick fences lose the fence line's indent from their
-      // content lines: marked takes the indent off ``` content and
-      // leaves ~~~ content exactly as written.
+      // Marked strips the fence line's indent off backtick-fence
+      // content only; tilde-fence content stays exactly as written.
       let line = stripped;
       if (isBacktick && fence.indent > 0) {
-        const leading = /^\s+/.exec(stripped);
-        if (leading) line = stripped.slice(Math.min(leading[0].length, fence.indent));
+        const ws = /^\s+/.exec(stripped);
+        const drop = ws ? Math.min(ws[0].length, fence.indent) : 0;
+        if (drop > 0) line = stripped.slice(drop);
       }
       content.push(line);
       at += 1;
@@ -2327,13 +2328,13 @@ function parseBlocks(src) {
   }
 
   function addItem(list, lm) {
-    // A blank line between two items loosens the list: either a genuine
-    // blank line, or a quote-blank found at the item level (e.g. ">"
-    // inside a blockquote that holds the list). A quote-blank found
-    // inside a nested quote within an item (cm-320) is not between
-    // items, so it loosens nothing.
-    const separated = pendingBlank || pendingQuoteBlankBetween;
-    if (list.children.length > 0 && separated) list.hadBlankBetween = true;
+    // Whether a blank separates this item from the previous one: a real
+    // blank line, or a quote-blank seen at this item level (a ">" line
+    // inside a blockquote wrapping the list). A quote-blank met inside a
+    // nested quote within an item (cm-320) sits inside that item, not
+    // between two items, so it must not loosen the list.
+    const gapBefore = pendingBlank || pendingQuoteBlankBetween;
+    if (list.children.length > 0 && gapBefore) list.hadBlankBetween = true;
     pendingQuoteBlankBetween = false;
     pendingBlank = false;
     pendingQuoteBlank = false;

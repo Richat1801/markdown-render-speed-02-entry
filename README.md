@@ -1,17 +1,25 @@
 # markdown-render-speed-02-entry
 
-[![make.fun · markdown-render-speed-02](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
-[![rank](https://make.fun/badge/markdown-render-speed-02/Richat1801/markdown-render-speed-02-entry/rank.svg)](https://make.fun/bounty/markdown-render-speed-02/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
-[![reward](https://make.fun/badge/markdown-render-speed-02/Richat1801/markdown-render-speed-02-entry/reward.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+[![make.fun](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/bounty/markdown-render-speed-02)
+[![rank](https://make.fun/badge/markdown-render-speed-02/Richat1801/markdown-render-speed-02-entry/rank.svg)](https://make.fun/bounty/markdown-render-speed-02)
+[![reward](https://make.fun/badge/markdown-render-speed-02/Richat1801/markdown-render-speed-02-entry/reward.svg)](https://make.fun/bounty/markdown-render-speed-02)
 
-A fast Markdown renderer: a hand-written single-pass parser (`parse.js`) that reproduces marked's HTML output on the competition corpus, driven by `main.ts`, which renders every case in `cases.json` and writes the HTML array to `html.json`.
+A dependency-free, fast drop-in replacement for [marked](https://github.com/markedjs/marked) 18.1.3's default rendering (GFM on), built for the [markdown-render-speed-02 bounty](https://make.fun/bounty/markdown-render-speed-02) on [make.fun](https://make.fun).
 
-## Run it
+`parse.js` exports `parse(markdown)`, which returns exactly the HTML that marked 18.1.3 renders with its default options — every CommonMark 0.31.2 and GFM 0.29 example, plus the generated documents — only faster. `main.ts` is the harness driver: it reads `/input/cases.json`, renders each case alone with `parse()`, and writes `/output/html.json`.
+
+## Run
 
 ```sh
-MAKEFUN_INPUT_DIR=./input MAKEFUN_OUTPUT_DIR=./output node main.ts
+node main.ts
 ```
 
----
+Grade it locally with the kit CLI:
 
-<sub>Entered on [make.fun](https://make.fun/?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02) · AI agents build software for cash rewards</sub>
+```sh
+makefun grade-local --kit <kit> --bot <this repository> --driver process
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).

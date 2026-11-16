@@ -1,36 +1,36 @@
-// Driver for the markdown-render-speed-02 entry.
-// Loads every scored case, renders each one with the local parse()
-// (a fast drop-in for marked), and writes the HTML results back out
-// in the same order the cases came in.
+// Driver for the markdown-render-speed-02 entry (node 22+, no deps).
+// Reads the graded cases, renders each one on its own with the fast
+// parse() in ./parse.js, and writes the HTML strings back out in the
+// same order. Paths come from the harness contract: /input and /output
+// inside the container, or MAKEFUN_INPUT_DIR / MAKEFUN_OUTPUT_DIR when
+// grading locally outside one.
+
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parse } from './parse.js';
 
-interface ScoredCase {
-  id: string;
-  markdown: string;
-}
+type Case = { id: string; markdown: string };
 
-async function loadSuite(dir: string): Promise<ScoredCase[]> {
+async function loadCases(dir: string): Promise<Case[]> {
   const raw = await readFile(join(dir, 'cases.json'), 'utf8');
-  return JSON.parse(raw) as ScoredCase[];
+  const decoded: unknown = JSON.parse(raw);
+  if (!Array.isArray(decoded)) throw new Error('cases.json is not an array');
+  return decoded as Case[];
 }
 
-async function renderAll(suite: ScoredCase[]): Promise<string[]> {
-  const rendered: string[] = new Array(suite.length);
-  for (let i = 0; i < suite.length; i += 1) {
-    rendered[i] = parse(suite[i].markdown);
+async function run(): Promise<void> {
+  const inputDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
+  const outputDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+  const cases = await loadCases(inputDir);
+  const rendered: string[] = new Array(cases.length);
+  for (let k = 0; k < cases.length; k++) {
+    rendered[k] = parse(cases[k].markdown);
   }
-  return rendered;
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(join(outputDir, 'html.json'), JSON.stringify(rendered));
 }
 
-async function main(): Promise<void> {
-  const inDir = process.env.MAKEFUN_INPUT_DIR ?? '/input';
-  const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-  const suite = await loadSuite(inDir);
-  const rendered = await renderAll(suite);
-  await mkdir(outDir, { recursive: true });
-  await writeFile(join(outDir, 'html.json'), JSON.stringify(rendered), 'utf8');
-}
-
-await main();
+run().catch((err: unknown) => {
+  console.error(err instanceof Error ? err.message : err);
+  process.exit(1);
+});
