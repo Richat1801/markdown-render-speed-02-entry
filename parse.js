@@ -2109,6 +2109,21 @@ function consumeIndentedCode(first, getLine, li, total) {
   return { lines: out, next: j };
 }
 
+// Does this line end a table body (not a row)? Marked's table body
+// lookahead is ` *\n` (spaces only) plus the `code` alternative
+// `(?: {4}| {0,3}\t)[^\n]`: an empty or spaces-only line ends it, as
+// does an indented-code line (4+ spaces, or 0-3 spaces + tab, followed
+// by any character). A lone tab is a row (an empty row): it has no
+// character after the tab for the `code` alternative to match.
+function tableBodyEnds(line) {
+  let i = 0;
+  while (i < line.length && line.charCodeAt(i) === 32) i++;
+  if (i === line.length) return true; // empty or spaces only
+  if (i >= 4) return true; // 4+ spaces then content: indented code
+  if (line.charCodeAt(i) === 9) return i + 1 < line.length; // tab + any char
+  return false;
+}
+
 // Build a table node from a header line and a delimiter line. bodyStart is
 // the index of the first body row. Returns {node, next} or null.
 function makeTable(header, delimLine, bodyStart, getLine, total) {
@@ -2120,7 +2135,7 @@ function makeTable(header, delimLine, bodyStart, getLine, total) {
   let j = bodyStart;
   while (j < total) {
     const line = getLine(j);
-    if (line === null || isBlankLine(line)) break;
+    if (line === null || tableBodyEnds(line)) break;
     if (startsBlock(line)) break;
     rows.push(splitTableRow(line));
     j++;
