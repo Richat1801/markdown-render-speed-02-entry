@@ -863,17 +863,14 @@ function parseAngle(src, i, items, st) {
   return -1;
 }
 
-const DISALLOWED_TAGS = new Set([
-  'title', 'textarea', 'style', 'xmp', 'iframe', 'noembed',
-  'noframes', 'script', 'plaintext'
-]);
-
 // Match an inline HTML construct at src[i] === '<'. Returns {text, end}
-// or null. Disallowed raw HTML tags are escaped instead of passed through.
+// or null. All raw HTML tags pass through (marked does not escape any).
 function matchInlineHtml(src, i) {
   const n = src.length;
-  // comment
+  // comment (<!--> and <!---> are complete comments on their own)
   if (src.startsWith('<!--', i)) {
+    if (src.startsWith('<!-->', i)) return { text: '<!-->', end: i + 5 };
+    if (src.startsWith('<!--->', i)) return { text: '<!--->', end: i + 6 };
     let end = src.indexOf('-->', i + 4);
     if (end < 0) return null;
     end += 3;
@@ -886,11 +883,14 @@ function matchInlineHtml(src, i) {
     end += 2;
     return { text: src.slice(i, end), end };
   }
-  // declaration <!A...>
+  // declaration <!NAME ...> — the name is letters, then whitespace is required
   if (src.startsWith('<!', i) && i + 2 < n) {
     const c = src.charCodeAt(i + 2);
-    if (c >= 65 && c <= 90) {
-      let end = src.indexOf('>', i + 2);
+    if (isAlphaCh(c)) {
+      let j = i + 2;
+      while (j < n && isAlphaCh(src.charCodeAt(j))) j++;
+      if (j >= n || !isSpaceCh(src.charCodeAt(j))) return null;
+      let end = src.indexOf('>', j);
       if (end < 0) return null;
       return { text: src.slice(i, end + 1), end: end + 1 };
     }
@@ -913,11 +913,17 @@ function matchInlineHtml(src, i) {
     else break;
   }
   const name = src.slice(nameStart, j);
-  // attributes
+  // a closing tag takes only optional whitespace, then >
+  if (closing) {
+    while (j < n && isSpaceCh(src.charCodeAt(j))) j++;
+    if (j >= n || src.charCodeAt(j) !== 62) return null;
+    return { text: src.slice(i, j + 1), end: j + 1 };
+  }
+  // attributes — each one requires whitespace before it
   let selfClose = false;
   for (;;) {
-    // skip whitespace
-    while (j < n && isSpaceCh(src.charCodeAt(j))) j++;
+    let ws = 0;
+    while (j < n && isSpaceCh(src.charCodeAt(j))) { j++; ws++; }
     if (j >= n) return null;
     const c = src.charCodeAt(j);
     if (c === 62) { j++; break; } // >
@@ -925,6 +931,7 @@ function matchInlineHtml(src, i) {
       if (j + 1 < n && src.charCodeAt(j + 1) === 62) { selfClose = true; j += 2; break; }
       return null;
     }
+    if (ws === 0) return null;
     // attribute name
     if (!(isAlphaCh(c) || c === 95 || c === 58 || c === 46 || c === 45)) return null;
     while (j < n) {
@@ -932,6 +939,9 @@ function matchInlineHtml(src, i) {
       if (isAlnumCh(d) || d === 95 || d === 58 || d === 46 || d === 45) j++;
       else break;
     }
+    // optional = value: peek past whitespace; only consume it when '='
+    // follows (otherwise it belongs to the next attribute's \s+)
+    const save = j;
     while (j < n && isSpaceCh(src.charCodeAt(j))) j++;
     if (j < n && src.charCodeAt(j) === 61) { // =
       j++;
@@ -953,11 +963,11 @@ function matchInlineHtml(src, i) {
         }
         if (!any) return null;
       }
+    } else {
+      j = save;
     }
   }
-  let text = src.slice(i, j);
-  if (DISALLOWED_TAGS.has(name.toLowerCase())) text = escapeText(text);
-  return { text, end: j };
+  return { text: src.slice(i, j), end: j };
 }
 
 // --- delimiter processing (opener-driven, as marked does it) ---
@@ -1180,7 +1190,12 @@ function parseInlineSlow(src, refs, st) {
     if (c === 92) { // backslash
       if (sp + 1 < n) {
         const d = src.charCodeAt(sp + 1);
-        if (d === 10) { items.push('<br>'); pos = sp + 2; }
+        if (d === 10) {
+          items.push('<br>');
+          pos = sp + 2;
+          // a hard break eats the next line's leading spaces/tabs
+          while (pos < n && (src.charCodeAt(pos) === 32 || src.charCodeAt(pos) === 9)) pos++;
+        }
         else if (isAsciiPunct(d)) { items.push(escapeText(src[sp + 1])); pos = sp + 2; }
         else { items.push('\\'); pos = sp + 1; }
       } else { items.push('\\'); pos = sp + 1; }
@@ -1266,6 +1281,8 @@ function parseInlineSlow(src, refs, st) {
           items[last] = s.slice(0, k);
           items.push('<br>');
           pos = sp + 1;
+          // a hard break eats the next line's leading spaces/tabs
+          while (pos < n && (src.charCodeAt(pos) === 32 || src.charCodeAt(pos) === 9)) pos++;
           re.lastIndex = pos;
           m = re.exec(src);
           continue;
