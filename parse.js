@@ -1099,6 +1099,32 @@ function linkExtent(src, i, isImage, refs) {
   return -1;
 }
 
+// Paragraph-level masking (marked's #n): before the emphasis/del scans,
+// marked masks code spans, inline links and HTML tags in the whole inline
+// text — first neutralising code-span inner backticks and escapes (Ot),
+// then masking code/link/html spans (blockSkip). A delimiter inside a
+// masked span is invisible to the closer scan (e.g. a `` `` `` run inside
+// link text can pair with a later `` `` `` run and hide the `_` between
+// them). maskInline returns the sorted [start,end) intervals, or null.
+const MASK_OT_RE = /(`+)(?:[^`]|[^`][\s\S]*?[^`])\1(?!`)|`+|\\([\p{P}\p{S}])/gu;
+const MASK_BLOCKSKIP_RE = /\[(?:[^\[\]`]|(?<a>`+)[^`]+\k<a>(?!`))*?\]\((?:\\[\s\S]|[^\{\(\)]|\((?:\\[\s\S]|[^\{\(\)])*?|\((?:\\[\s\S]|[^\(\)])*?\))*\)|(?<!`)()(?<b>`+)[^`]+\k<b>(?!`)|<(?! )[^<>]*?>/g;
+function maskInline(src) {
+  const t1 = src.replace(MASK_OT_RE, (n, s, r) => r ? '+'.repeat(n.length) : s ? s + n.slice(s.length, -s.length).replace(/`/g, '+') + s : n);
+  const intervals = [];
+  for (const m of t1.matchAll(MASK_BLOCKSKIP_RE)) intervals.push([m.index, m.index + m[0].length]);
+  return intervals.length ? intervals : null;
+}
+// If pos is inside a masked interval, return that interval's end; else -1.
+// Intervals are sorted and non-overlapping.
+function maskEndAt(mask, pos) {
+  for (let i = 0; i < mask.length; i++) {
+    const iv = mask[i];
+    if (pos < iv[0]) return -1;
+    if (pos < iv[1]) return iv[1];
+  }
+  return -1;
+}
+
 // Closer-scan skip patterns: when looking for a `*` closer, a region
 // `__...*...__` is skipped whole (and symmetrically `**..._...**` for `_`).
 const SKIP_STAR_RE = /[^_*]*?__[^_*]*?\*[^_*]*?(?=__)/y;
@@ -1134,9 +1160,12 @@ function htmlExtent(src, i) {
 // Closer candidates are classified by flanking: opener-like runs add to
 // the length still needed, closer-like runs subtract from it, and runs that
 // can both open and close are subject to the rule of three (on Y).
-function findEmClose(src, sp, L, Y, ch, refs) {
+function findEmClose(src, sp, L, Y, ch, refs, mask) {
   const n = src.length;
   const chr = String.fromCharCode(ch);
+  // The opener itself is inside a masked span (code/link/html): marked's
+  // scan never sees it as a delimiter, so no emphasis forms from it.
+  if (mask && maskEndAt(mask, sp) > 0) return null;
   let m = L, f = 0;
   let q = sp + L;
   const skipRe = ch === 42 ? SKIP_STAR_RE : SKIP_UND_RE;
@@ -1153,6 +1182,11 @@ function findEmClose(src, sp, L, Y, ch, refs) {
     if (l >= 0 && (next < 0 || l < next)) next = l;
     if (t >= 0 && (next < 0 || t < next)) next = t;
     if (next < 0) return null;
+    // A candidate inside a masked span is invisible to marked's scan.
+    if (mask) {
+      const me = maskEndAt(mask, next);
+      if (me > 0) { q = me; continue; }
+    }
     if (next === b) {
       // An escaped backtick is a literal character, not a code-span
       // opener (marked's masking hides it via the escape rule). Skip
@@ -1217,8 +1251,10 @@ function findEmClose(src, sp, L, Y, ch, refs) {
 // equals the opener length (a longer run contributes its first `o`
 // tildes, the rest is re-scanned). Both-flanking runs count as closers
 // (there is no rule of three for del). Returns {innerEnd} or null.
-function findDelClose(src, sp, o, refs) {
+function findDelClose(src, sp, o, refs, mask) {
   const n = src.length;
+  // The opener itself is inside a masked span: no strikethrough forms.
+  if (mask && maskEndAt(mask, sp) > 0) return null;
   let p = o;
   let q = sp + o;
   while (q < n) {
@@ -1231,6 +1267,11 @@ function findDelClose(src, sp, o, refs) {
     if (l >= 0 && (next < 0 || l < next)) next = l;
     if (t >= 0 && (next < 0 || t < next)) next = t;
     if (next < 0) return null;
+    // A candidate inside a masked span is invisible to marked's scan.
+    if (mask) {
+      const me = maskEndAt(mask, next);
+      if (me > 0) { q = me; continue; }
+    }
     if (next === b) {
       // An escaped backtick is a literal character, not a code-span
       // opener (marked's masking hides it via the escape rule).
@@ -1342,6 +1383,11 @@ function parseInlineSlow(src, refs, st) {
   const n = src.length;
   const items = [];
   let pos = 0;
+  // Masked spans (code/link/html per marked's #n) hide delimiters from
+  // the emphasis/del closer scans. Only needed when delimiters and
+  // maskable constructs both occur.
+  const mask = (src.indexOf('*') >= 0 || src.indexOf('_') >= 0 || src.indexOf('~') >= 0) &&
+    (src.indexOf('`') >= 0 || src.indexOf('[') >= 0 || src.indexOf('<') >= 0) ? maskInline(src) : null;
   let m = nextInlineSpecial(src, 0);
   while (true) {
     const sp = m ? m.index : n;
@@ -1381,7 +1427,7 @@ function parseInlineSlow(src, refs, st) {
       const fl = delimFlanking(src, runStart, fullRun, c);
       let done = false;
       if (fl.canOpen) {
-        const close = findEmClose(src, sp, runEnd - sp, fullRun, c, refs);
+        const close = findEmClose(src, sp, runEnd - sp, fullRun, c, refs, mask);
         if (close) {
           const strip = close.strong ? 2 : 1;
           const inner = src.slice(sp + strip, close.innerEnd - strip);
@@ -1404,7 +1450,7 @@ function parseInlineSlow(src, refs, st) {
       // the opener is one or two tildes; a run of three or more cannot
       // open here (the char after two tildes would be a tilde)
       if (run <= 2 && delimFlanking(src, sp, run, 126).canOpen) {
-        const close = findDelClose(src, sp, run, refs);
+        const close = findDelClose(src, sp, run, refs, mask);
         if (close) {
           const inner = src.slice(sp + run, close.innerEnd - run);
           items.push('<del>' + parseInline(inner, refs, st) + '</del>');
