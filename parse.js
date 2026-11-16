@@ -2101,11 +2101,12 @@ function consumeFence(fence, getLine, rawLineAt, li, total, inQuote) {
     const line = getLine(j);
     if (line !== null) {
       if (closeRe.test(line)) { closed = true; break; }
-      // Strip up to fence.indent leading whitespace CHARACTERS (marked's
-      // Dt: slice(min(leadingWS.length, indentChars))); a tab counts as
-      // one character, so a tab straddling the indent is fully consumed.
+      // Strip up to fence.indent leading whitespace CHARACTERS, but
+      // only for BACKTICK fences: marked's Dt uses
+      // indentCodeCompensation /^(\s+)(?:```)/, which does not match a
+      // tilde fence, so tilde-fence content keeps its full indent.
       let content = line;
-      if (fence.indent > 0) {
+      if (fence.ch === 96 && fence.indent > 0) {
         const m = /^\s+/.exec(line);
         if (m) content = line.slice(Math.min(m[0].length, fence.indent));
       }
