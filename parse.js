@@ -1669,6 +1669,35 @@ function parseTitleMulti(lines, li, k) {
   return null;
 }
 
+// Find the end of a link reference definition label starting at
+// lines[idx][i] === '['. The label may span lines (marked's `le` pattern:
+// escapes, any char except [ ] \, or a newline not followed by a blank
+// line). Returns {label, endLine, endPos} or null.
+function findRefLabelEnd(lines, idx, i) {
+  let label = '';
+  let li = idx, p = i + 1;
+  while (li < lines.length) {
+    const s = lines[li];
+    while (p < s.length) {
+      const c = s.charCodeAt(p);
+      if (c === 92 && p + 1 < s.length) { label += s[p] + s[p + 1]; p += 2; continue; }
+      if (c === 91) return null; // unescaped [ in a ref label
+      if (c === 93) {
+        if (label.trim() === '') return null; // (?!\s*\])
+        return { label, endLine: li, endPos: p };
+      }
+      label += s[p];
+      p++;
+    }
+    li++;
+    if (li >= lines.length) return null;
+    if (lines[li].trim() === '') return null; // blank line ends the label
+    label += '\n';
+    p = 0;
+  }
+  return null;
+}
+
 // Parse a link reference definition starting at lines[idx].
 // Returns {label, dest, title, nextLine} or null.
 function parseRefDef(lines, idx) {
@@ -1676,27 +1705,28 @@ function parseRefDef(lines, idx) {
   const [cols, i] = leadingWS(line);
   if (cols > 3) return null;
   if (i >= line.length || line.charCodeAt(i) !== 91) return null;
-  const close = findLinkEnd(line, i);
-  if (close < 0) return null;
-  const label = line.slice(i + 1, close);
+  const lab = findRefLabelEnd(lines, idx, i);
+  if (!lab) return null;
+  const { label, endLine, endPos } = lab;
   if (label.length === 0 || label.length > 999) return null;
   // ref labels may not contain unescaped [ or ] (marked's `le` pattern)
   if (hasUnescapedBracket(label)) return null;
-  let j = skipWSOnLine(line, close + 1);
-  if (j >= line.length || line.charCodeAt(j) !== 58) return null;
+  const eline = lines[endLine];
+  let j = skipWSOnLine(eline, endPos + 1);
+  if (j >= eline.length || eline.charCodeAt(j) !== 58) return null;
   j++;
-  j = skipWSOnLine(line, j);
+  j = skipWSOnLine(eline, j);
   // the destination may be on this line or the next one (a continuation
   // line of the paragraph; its indentation is not limited)
-  let destLine = idx;
-  let dline = line;
+  let destLine = endLine;
+  let dline = eline;
   let k = j;
-  if (k >= line.length) {
-    if (idx + 1 >= lines.length) return null;
-    const nl = lines[idx + 1];
+  if (k >= dline.length) {
+    if (endLine + 1 >= lines.length) return null;
+    const nl = lines[endLine + 1];
     const [, ni] = leadingWS(nl);
     if (ni >= nl.length) return null;
-    destLine = idx + 1;
+    destLine = endLine + 1;
     dline = nl;
     k = ni;
   }
@@ -2008,6 +2038,9 @@ function parseBlocks(src) {
   const stack = [doc];
   let para = null;
   let pendingBlank = false;
+  // a quote-blank line (">") separates blocks inside an item but does not
+  // separate list items (cm-259 vs cm-320)
+  let pendingQuoteBlank = false;
 
   function container() { return stack[stack.length - 1]; }
 
@@ -2067,8 +2100,9 @@ function parseBlocks(src) {
   // block directly inside an item makes that item loose.
   function addBlock(node) {
     const parent = container();
-    if (pendingBlank && parent.t === 'item') parent.hadBlank = true;
+    if ((pendingBlank || pendingQuoteBlank) && parent.t === 'item') parent.hadBlank = true;
     pendingBlank = false;
+    pendingQuoteBlank = false;
     parent.children.push(node);
     return node;
   }
@@ -2076,6 +2110,7 @@ function parseBlocks(src) {
   function addItem(list, lm) {
     if (pendingBlank && list.children.length > 0) list.hadBlankBetween = true;
     pendingBlank = false;
+    pendingQuoteBlank = false;
     const item = { t: 'item', contentIndent: lm.contentIndent, children: [], hadBlank: false, task: null };
     list.children.push(item);
     stack.push(item);
@@ -2120,12 +2155,16 @@ function parseBlocks(src) {
     // 1. match the open containers
     let cur = rawLine;
     let failAt = -1;
+    // a line that becomes blank only because a quote marker was stripped
+    // (">") closes the paragraph but is not a blank line for looseness
+    let blankFromQuote = false;
     for (let si = 1; si < stack.length; si++) {
       const b = stack[si];
       if (b.t === 'quote') {
         const m = matchQuote(cur);
         if (m === null) { failAt = si; break; }
         cur = m;
+        if (isBlankLine(cur)) blankFromQuote = true;
       } else if (b.t === 'item') {
         if (isBlankLine(cur)) cur = '';
         else {
@@ -2181,7 +2220,8 @@ function parseBlocks(src) {
       if (container().t === 'item' && container().children.length === 0) {
         stack.pop();
       }
-      pendingBlank = true;
+      if (blankFromQuote) pendingQuoteBlank = true;
+      else pendingBlank = true;
       li++;
       continue;
     }
