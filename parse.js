@@ -1795,7 +1795,6 @@ function parseTitleMulti(lines, li, k) {
   const first = lines[li];
   const tc = first.charCodeAt(k);
   const closer = tc === 40 ? 41 : tc;
-  let depth = tc === 40 ? 1 : 0;
   let content = '';
   let p = k + 1;
   let cur = li;
@@ -1809,11 +1808,11 @@ function parseTitleMulti(lines, li, k) {
         continue;
       }
       if (tc === 40) {
-        if (c === 40) { depth++; content += s[p]; p++; continue; }
+        // a parenthesised title may not contain an unescaped `(` (the
+        // title ends at the first unescaped `)`)
+        if (c === 40) return null;
         if (c === 41) {
-          depth--;
-          if (depth === 0) return { title: content, endLine: cur, endPos: p + 1 };
-          content += s[p]; p++; continue;
+          return { title: content, endLine: cur, endPos: p + 1 };
         }
       } else if (c === closer) {
         return { title: content, endLine: cur, endPos: p + 1 };
@@ -1940,9 +1939,12 @@ function parseRefDef(lines, idx) {
       // not a title: on the destination line that is junk after the
       // dest (invalid refdef); on a following line it is just text
       if (onDestLine) return null;
-    } else if (tc === 40 && bracketed) {
-      if (onDestLine) return null; // no (title) after <dest>
     } else {
+      // a title after a bracketed destination must be separated from
+      // it by whitespace on the same line (cm-201: `[foo]: <bar>(baz)`
+      // is not a refdef); a title on a following line is separated by
+      // the newline itself
+      if (bracketed && onDestLine && tp === destEnd) return null;
       const t = parseTitleMulti(lines, tli, tp);
       if (t) {
         const e = skipWSOnLine(lines[t.endLine], t.endPos);
