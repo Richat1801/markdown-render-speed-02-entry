@@ -1662,7 +1662,10 @@ function matchFence(s) {
   const sp = info.search(/[ \t]/);
   if (sp >= 0) info = info.slice(0, sp);
   info = unescapeBackslashes(info);
-  return { ch, len, info, indent: cols };
+  // indent is the CHARACTER count of the leading whitespace (marked's
+  // Dt strips that many characters from content lines, not columns: a
+  // tab in the content is one character and is fully consumed).
+  return { ch, len, info, indent: i };
 }
 
 // Thematic break: 3+ of the same -, _, * with optional spaces.
@@ -2092,7 +2095,15 @@ function consumeFence(fence, getLine, rawLineAt, li, total, inQuote) {
     const line = getLine(j);
     if (line !== null) {
       if (closeRe.test(line)) { closed = true; break; }
-      out.push(fence.indent > 0 ? stripIndentCols(line, fence.indent) : line);
+      // Strip up to fence.indent leading whitespace CHARACTERS (marked's
+      // Dt: slice(min(leadingWS.length, indentChars))); a tab counts as
+      // one character, so a tab straddling the indent is fully consumed.
+      let content = line;
+      if (fence.indent > 0) {
+        const m = /^\s+/.exec(line);
+        if (m) content = line.slice(Math.min(m[0].length, fence.indent));
+      }
+      out.push(content);
       j++;
       continue;
     }
