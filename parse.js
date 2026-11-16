@@ -237,101 +237,109 @@ function isEmailLocalChar(c) {
 }
 
 // Validate an email domain starting at i (after the @). Returns the end
-// index (exclusive) of the domain, or -1. Requires at least one dot.
+// index (exclusive) of the domain, or -1. Mirrors marked's `It`:
+// [a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![\w-]).
+// A trailing dot ends the domain before it; a label ending in - fails.
 function emailDomainEnd(src, i) {
   const n = src.length;
   let j = i;
-  let labels = 0;
-  let hasDot = false;
-  while (j < n) {
-    // one label: alnum, then alnum/- up to 63 chars, ending alnum
-    if (!isAlnumCh(src.charCodeAt(j))) return -1;
-    let len = 0;
-    let lastAlnum = -1;
-    while (j < n) {
-      const c = src.charCodeAt(j);
-      if (isAlnumCh(c)) { lastAlnum = j; j++; len++; }
-      else if (c === 45) { j++; len++; }
-      else break;
-      if (len > 63) return -1;
-    }
-    if (lastAlnum < 0 || src.charCodeAt(j - 1) === 45) return -1;
-    labels++;
-    if (j < n && src.charCodeAt(j) === 46) { // .
-      hasDot = true;
-      j++;
-      if (j >= n || !isAlnumCh(src.charCodeAt(j))) return -1;
-      continue;
-    }
-    break;
+  const isDomCh = (c) => isAlnumCh(c) || c === 45 || c === 95;
+  if (j >= n || !isDomCh(src.charCodeAt(j))) return -1;
+  while (j < n && isDomCh(src.charCodeAt(j))) j++;
+  let groups = 0;
+  while (j < n && src.charCodeAt(j) === 46) {
+    let k = j + 1;
+    while (k < n && isDomCh(src.charCodeAt(k))) k++;
+    if (k === j + 1) break; // empty label after the dot
+    if (!isAlnumCh(src.charCodeAt(k - 1))) break; // label must end alnum
+    groups++;
+    j = k;
   }
-  if (!hasDot || labels < 2) return -1;
+  if (groups === 0) return -1;
+  // (?![\w-])
+  if (j < n) {
+    const c = src.charCodeAt(j);
+    if (isAlnumCh(c) || c === 45 || c === 95) return -1;
+  }
   return j;
 }
 
-// Trim trailing punctuation from an extended-autolink URL (GFM rules):
-// trailing ? ! . , : ; * _ ~ are dropped (but a ; that ends an entity
-// reference is kept); a trailing ) is dropped when parens are unbalanced.
-function trimAutolinkUrl(url) {
-  let end = url.length;
-  for (;;) {
-    if (end === 0) break;
-    const last = url.charCodeAt(end - 1);
-    if (last === 41) { // )
-      let open = 0, close = 0;
-      for (let k = 0; k < end; k++) {
-        const c = url.charCodeAt(k);
-        if (c === 40) open++;
-        else if (c === 41) close++;
-      }
-      if (open > close) break;
-      end--;
+// The punctuation the _backpedal drops at the end of a URL.
+const BP_PUNCT = new Set([63, 33, 46, 44, 58, 59, 42, 95, 39, 34, 126, 41]);
+
+// One application of marked's _backpedal regex:
+// /^(?:[^?!.,:;*_'\"~()&]+|\([^)]*\)|&(?![a-zA-Z0-9]+;$)|[?!.,:;*_'\"~)]+(?!$))+/
+// Returns the longest prefix it matches. A trailing punctuation run loses
+// one character per application (the run backtracks one char so the
+// lookahead (?!$) succeeds), so callers loop until stable.
+function backpedalOnce(url) {
+  let i = 0;
+  const n = url.length;
+  while (i < n) {
+    const c = url.charCodeAt(i);
+    if (c === 40) { // ( ... ) — a balanced group is kept whole
+      let j = i + 1;
+      while (j < n && url.charCodeAt(j) !== 41) j++;
+      if (j < n) { i = j + 1; continue; }
+      break; // unmatched ( : everything from here is dropped
+    }
+    if (c === 38) { // & — kept unless it starts an entity at the very end
+      let j = i + 1;
+      while (j < n && isAlnumCh(url.charCodeAt(j))) j++;
+      if (j < n && url.charCodeAt(j) === 59 && j > i + 1 && j + 1 === n) break;
+      i++;
       continue;
     }
-    if (last === 59) { // ;
-      // keep when it ends an entity reference &word;
-      let k = end - 2;
-      while (k >= 0 && isAlnumCh(url.charCodeAt(k))) k--;
-      if (k >= 0 && url.charCodeAt(k) === 38 && end - 2 - k >= 1) break;
-      end--;
-      continue;
+    if (BP_PUNCT.has(c)) {
+      let j = i;
+      while (j < n && BP_PUNCT.has(url.charCodeAt(j))) j++;
+      if (j < n) { i = j; continue; } // run not at the end: kept
+      i = j - 1; // run reaches the end: backtrack one char
+      break;
     }
-    if (last === 63 || last === 33 || last === 46 || last === 44 ||
-        last === 58 || last === 42 || last === 95 || last === 126) {
-      end--;
-      continue;
+    // ordinary characters
+    while (i < n) {
+      const d = url.charCodeAt(i);
+      if (d === 40 || d === 41 || d === 38 || BP_PUNCT.has(d)) break;
+      i++;
     }
-    break;
   }
-  return url.slice(0, end);
+  return url.slice(0, i);
+}
+
+// Trim trailing punctuation from an extended-autolink URL (GFM rules),
+// by applying _backpedal until the string stops changing.
+function trimAutolinkUrl(url) {
+  let prev;
+  do {
+    prev = url;
+    url = backpedalOnce(url);
+  } while (url !== prev);
+  return url;
 }
 
 // Validate the domain of a www./http(s):// autolink. `i` is the index just
-// after 'www.' or '://'. Returns the end of the domain, or -1. The domain
-// must have at least two labels; the last label must be >= 2 letters.
+// after 'www.' or '://'. Returns the end of the domain, or -1. Mirrors
+// marked's (?:[a-zA-Z0-9\-]+\.?)+: labels of alnum/- each optionally
+// followed by a dot, no minimum label count or TLD rule (the backpedal
+// drops a trailing dot afterwards).
 function wwwDomainEnd(src, i) {
   const n = src.length;
   let j = i;
-  let labels = 0;
-  let lastLabel = '';
+  let any = false;
   while (j < n) {
     const c = src.charCodeAt(j);
-    if (isAlnumCh(c) || c === 45) { lastLabel += src[j]; j++; }
-    else if (c === 46) {
-      if (lastLabel === '') return -1;
-      labels++;
-      lastLabel = '';
-      j++;
-    } else break;
+    if (isAlnumCh(c) || c === 45) { j++; any = true; }
+    else if (c === 46) j++; // the dot after a label; a following label may or may not come
+    else break;
   }
-  if (lastLabel === '' || labels < 1) return -1;
-  labels++;
-  if (labels < 2) return -1;
-  if (lastLabel.length < 2) return -1;
-  for (let k = 0; k < lastLabel.length; k++) {
-    if (!isAlphaCh(lastLabel.charCodeAt(k))) return -1;
-  }
-  return j;
+  return any ? j : -1;
+}
+
+// A bare email's local part: [A-Za-z0-9._+-] only (marked's `It`; the
+// wider set is only for <...> autolinks).
+function isBareEmailLocalChar(c) {
+  return isAlnumCh(c) || c === 46 || c === 95 || c === 43 || c === 45;
 }
 
 // Try to parse an extended autolink starting at `p` (where a trigger was
@@ -341,31 +349,50 @@ function parseExtendedAutolink(src, p, kind, runStart) {
   const n = src.length;
   if (kind === 3) { // email: local part ends at p (the @)
     let ls = p;
-    while (ls > runStart && isEmailLocalChar(src.charCodeAt(ls - 1))) ls--;
+    while (ls > runStart && isBareEmailLocalChar(src.charCodeAt(ls - 1))) ls--;
     if (ls === p) return null;
     const domEnd = emailDomainEnd(src, p + 1);
     if (domEnd < 0) return null;
     const text = src.slice(ls, domEnd);
     return { href: 'mailto:' + text, text, end: domEnd, start: ls };
   }
+  if (kind === 4) { // mailto: or xmpp: prefix
+    const isXmpp = src.charCodeAt(p) === 120; // x
+    // preceding character must be the start or a non-alphanumeric
+    if (p > 0 && isAlnumCh(src.charCodeAt(p - 1))) return null;
+    const ep = p + (isXmpp ? 5 : 7);
+    let ls = ep;
+    while (ls < n && isBareEmailLocalChar(src.charCodeAt(ls))) ls++;
+    if (ls === ep || ls >= n || src.charCodeAt(ls) !== 64) return null;
+    const domEnd = emailDomainEnd(src, ls + 1);
+    if (domEnd < 0) return null;
+    let end = domEnd;
+    if (isXmpp) {
+      // optional one /[A-Za-z0-9@.]+ segment
+      if (end < n && src.charCodeAt(end) === 47) {
+        let k = end + 1;
+        while (k < n) {
+          const c = src.charCodeAt(k);
+          if (isAlnumCh(c) || c === 64 || c === 46) k++;
+          else break;
+        }
+        if (k > end + 1) end = k;
+      }
+    }
+    const url = trimAutolinkUrl(src.slice(p, end));
+    if (url.length === 0) return null;
+    return { href: url, text: url, end: p + url.length, start: p };
+  }
   // www. or http(s)://
   const schemeEnd = kind === 1 ? p + 4 : src.indexOf('://', p) + 3;
   if (kind === 1) {
-    // preceding character must be start, whitespace, or one of * _ ~ ( [ {
+    // www. must be at the start, or after whitespace, *, _, ~ or (
     if (p > 0) {
       const pc = src.charCodeAt(p - 1);
-      if (!isSpaceCh(pc) && pc !== 42 && pc !== 95 && pc !== 126 &&
-          pc !== 40 && pc !== 91 && pc !== 123 && pc !== 60 && pc !== 34 &&
-          pc !== 39) return null;
-    }
-  } else {
-    if (p > 0) {
-      const pc = src.charCodeAt(p - 1);
-      if (!isSpaceCh(pc) && pc !== 42 && pc !== 95 && pc !== 126 &&
-          pc !== 40 && pc !== 91 && pc !== 123 && pc !== 60 && pc !== 34 &&
-          pc !== 39) return null;
+      if (!isSpaceCh(pc) && pc !== 42 && pc !== 95 && pc !== 126 && pc !== 40) return null;
     }
   }
+  // http(s):// has no preceding-character restriction
   const domEnd = wwwDomainEnd(src, schemeEnd);
   if (domEnd < 0) return null;
   // scan the rest of the URL: until whitespace, <, >, or a control char
@@ -377,7 +404,6 @@ function parseExtendedAutolink(src, p, kind, runStart) {
   }
   let url = trimAutolinkUrl(src.slice(p, end));
   if (url.length === 0) return null;
-  // the domain must still be valid after trimming (trimming only affects the tail)
   const href = kind === 1 ? 'http://' + url : url;
   return { href, text: url, end: p + url.length, start: p };
 }
@@ -401,6 +427,10 @@ function scanTextRun(src, start, end, items, st) {
     if (h1 >= 0 && h1 < end && (p < 0 || h1 < p)) { p = h1; kind = 2; }
     const h2 = src.indexOf('https://', i);
     if (h2 >= 0 && h2 < end && (p < 0 || h2 < p)) { p = h2; kind = 2; }
+    const m1 = src.indexOf('mailto:', i);
+    if (m1 >= 0 && m1 < end && (p < 0 || m1 < p)) { p = m1; kind = 4; }
+    const m2 = src.indexOf('xmpp:', i);
+    if (m2 >= 0 && m2 < end && (p < 0 || m2 < p)) { p = m2; kind = 4; }
     const at = src.indexOf('@', i);
     if (at >= 0 && at < end && (p < 0 || at < p)) { p = at; kind = 3; }
     if (p < 0) {
@@ -410,7 +440,7 @@ function scanTextRun(src, start, end, items, st) {
     const link = parseExtendedAutolink(src, p, kind, i);
     if (!link) {
       // not an autolink: emit text up to and including the trigger's first char
-      const cut = kind === 3 ? p + 1 : p + 1;
+      const cut = p + 1;
       if (i < cut) items.push(escapeText(src.slice(i, cut)));
       i = cut;
       continue;
@@ -1175,17 +1205,43 @@ function parseCodeSpan(src, sp, items) {
   return found + run;
 }
 
+// The next inline special character at or after `from`, skipping `_` runs
+// that cannot open or close anything (marked's text stops at `_` only
+// after a word boundary, so a dead `_` stays inside the text run — this
+// lets an email's local part span it, e.g. a.b-c_d@a.b).
+function nextInlineSpecial(src, from) {
+  const re = INLINE_SPECIAL_G;
+  re.lastIndex = from;
+  let m = re.exec(src);
+  while (m) {
+    const sp = m.index;
+    if (src.charCodeAt(sp) === 95) {
+      let run = 1;
+      while (sp + run < src.length && src.charCodeAt(sp + run) === 95) run++;
+      const fl = delimFlanking(src, sp, run, 95);
+      if (!fl.canOpen && !fl.canClose) {
+        re.lastIndex = sp + run;
+        m = re.exec(src);
+        continue;
+      }
+    }
+    return m;
+  }
+  return null;
+}
+
 function parseInlineSlow(src, refs, st) {
   const n = src.length;
   const items = [];
-  const re = INLINE_SPECIAL_G;
   let pos = 0;
-  re.lastIndex = 0;
-  let m = re.exec(src);
+  let m = nextInlineSpecial(src, 0);
   while (true) {
     const sp = m ? m.index : n;
     pos = scanTextRun(src, pos, sp, items, st);
     if (!m) break;
+    // scanTextRun may have consumed past sp (an autolink running past the
+    // next special character, e.g. a URL containing &): the match is stale
+    if (pos > sp) { m = nextInlineSpecial(src, pos); continue; }
     const c = src.charCodeAt(sp);
     if (c === 92) { // backslash
       if (sp + 1 < n) {
@@ -1283,16 +1339,14 @@ function parseInlineSlow(src, refs, st) {
           pos = sp + 1;
           // a hard break eats the next line's leading spaces/tabs
           while (pos < n && (src.charCodeAt(pos) === 32 || src.charCodeAt(pos) === 9)) pos++;
-          re.lastIndex = pos;
-          m = re.exec(src);
+          m = nextInlineSpecial(src, pos);
           continue;
         }
       }
       items.push('\n');
       pos = sp + 1;
     }
-    re.lastIndex = pos;
-    m = re.exec(src);
+    m = nextInlineSpecial(src, pos);
   }
   let out = '';
   for (const it of items) out += it;
