@@ -1767,59 +1767,20 @@ function matchListItem(s) {
 }
 
 // Split a table row into cells on unescaped | outside code spans.
+// marked's de(): split a table row on every unescaped | — code spans do
+// NOT protect a pipe (a | inside `code` still splits the row); an
+// escaped \| stays a literal | in the cell (backslash removed at this
+// level, before inline parsing).
 function splitTableRow(row) {
-  const cells = [];
-  let cur = '';
-  let i = 0;
-  const n = row.length;
-  while (i < n) {
-    const c = row.charCodeAt(i);
-    if (c === 92 && i + 1 < n && row.charCodeAt(i + 1) === 124) {
-      cur += '|';
-      i += 2;
-      continue;
-    }
-    if (c === 96) {
-      // code span: skip to the matching run
-      let run = 1;
-      while (i + run < n && row.charCodeAt(i + run) === 96) run++;
-      let j = i + run;
-      let found = -1;
-      while (j < n) {
-        if (row.charCodeAt(j) === 96) {
-          let r2 = 1;
-          while (j + r2 < n && row.charCodeAt(j + r2) === 96) r2++;
-          if (r2 === run) { found = j; break; }
-          j += r2;
-        } else j++;
-      }
-      if (found < 0) {
-        // unclosed code span: the backticks are literal and do not stop
-        // the cell from being split on a later |
-        cur += row.slice(i, i + run);
-        i += run;
-      } else {
-        // a \| inside the code span is an escaped pipe: it becomes a
-        // literal | in the cell (so the code span renders "a | b")
-        cur += row.slice(i, found + run).replace(/\\\|/g, '|');
-        i = found + run;
-      }
-      continue;
-    }
-    if (c === 124) {
-      cells.push(cur);
-      cur = '';
-      i++;
-      continue;
-    }
-    cur += row[i];
-    i++;
-  }
-  cells.push(cur);
-  // strip one leading and one trailing empty cell from outer pipes
+  const t = row.replace(/\|/g, (r, o, i) => {
+    let l = false, p = o;
+    for (; --p >= 0 && i[p] === '\\';) l = !l;
+    return l ? '|' : ' |';
+  });
+  const cells = t.split(/ \|/);
   if (cells.length > 0 && cells[0].trim() === '') cells.shift();
   if (cells.length > 0 && cells[cells.length - 1].trim() === '') cells.pop();
-  return cells.map((c) => c.trim());
+  return cells.map((c) => c.trim().replace(/\\\|/g, '|'));
 }
 
 // Parse a table delimiter row. Returns an array of alignments
