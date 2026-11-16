@@ -2259,9 +2259,11 @@ function parseBlocks(src) {
   const stack = [doc];
   let para = null;
   let pendingBlank = false;
-  // a quote-blank line (">") separates blocks inside an item but does not
-  // separate list items (cm-259 vs cm-320)
+  // a quote-blank line (">") separates blocks inside an item (cm-259);
+  // one at the item level also separates list items (doc-15), but one
+  // inside a nested quote within an item does not (cm-320)
   let pendingQuoteBlank = false;
+  let pendingQuoteBlankBetween = false;
 
   function container() { return stack[stack.length - 1]; }
 
@@ -2324,12 +2326,18 @@ function parseBlocks(src) {
     if ((pendingBlank || pendingQuoteBlank) && parent.t === 'item') parent.hadBlank = true;
     pendingBlank = false;
     pendingQuoteBlank = false;
+    pendingQuoteBlankBetween = false;
     parent.children.push(node);
     return node;
   }
 
   function addItem(list, lm) {
-    if (pendingBlank && list.children.length > 0) list.hadBlankBetween = true;
+    // a blank line between items (real blank, or a quote-blank at the
+    // item level, e.g. ">" inside a blockquote that contains the list)
+    // makes the list loose; a quote-blank inside a nested quote within
+    // an item (cm-320) does not
+    if ((pendingBlank || pendingQuoteBlankBetween) && list.children.length > 0) list.hadBlankBetween = true;
+    pendingQuoteBlankBetween = false;
     pendingBlank = false;
     pendingQuoteBlank = false;
     const item = { t: 'item', contentIndent: lm.contentIndent, children: [], hadBlank: false, task: null };
@@ -2442,8 +2450,14 @@ function parseBlocks(src) {
       if (container().t === 'item' && container().children.length === 0) {
         stack.pop();
       }
-      if (blankFromQuote) pendingQuoteBlank = true;
-      else pendingBlank = true;
+      if (blankFromQuote) {
+        pendingQuoteBlank = true;
+        // a quote-blank whose innermost container is the item itself is
+        // at the item level (between items, or between blocks in the
+        // item); a quote-blank inside a nested quote within the item is
+        // not between items
+        if (container().t === 'item') pendingQuoteBlankBetween = true;
+      } else pendingBlank = true;
       li++;
       continue;
     }
