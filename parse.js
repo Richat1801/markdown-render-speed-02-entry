@@ -2557,16 +2557,16 @@ function parseBlocks(src) {
 // Rendering
 // ---------------------------------------------------------------------------
 
-function renderInlineText(text, refs) {
-  return parseInline(text, refs);
+function renderInlineText(text, refs, st) {
+  return parseInline(text, refs, st);
 }
 
-function renderBlock(node, refs) {
+function renderBlock(node, refs, st) {
   switch (node.t) {
     case 'p':
-      return '<p>' + renderInlineText(node.lines.join('\n'), refs) + '</p>\n';
+      return '<p>' + renderInlineText(node.lines.join('\n'), refs, st) + '</p>\n';
     case 'h':
-      return '<h' + node.level + '>' + renderInlineText(node.lines.join('\n'), refs) + '</h' + node.level + '>\n';
+      return '<h' + node.level + '>' + renderInlineText(node.lines.join('\n'), refs, st) + '</h' + node.level + '>\n';
     case 'hr':
       return '<hr>\n';
     case 'code': {
@@ -2580,14 +2580,14 @@ function renderBlock(node, refs) {
       return node.text;
     case 'quote': {
       let s = '<blockquote>\n';
-      for (const child of node.children) s += renderBlock(child, refs);
+      for (const child of node.children) s += renderBlock(child, refs, st);
       return s + '</blockquote>\n';
     }
     case 'list': {
       const tag = node.ordered ? 'ol' : 'ul';
       const start = node.ordered && node.start !== 1 ? ' start="' + node.start + '"' : '';
       let s = '<' + tag + start + '>\n';
-      for (const item of node.children) s += renderItem(item, node.tight, refs);
+      for (const item of node.children) s += renderItem(item, node.tight, refs, st);
       return s + '</' + tag + '>\n';
     }
     case 'table': {
@@ -2595,7 +2595,7 @@ function renderBlock(node, refs) {
       for (let i = 0; i < node.head.length; i++) {
         const a = node.aligns[i];
         s += '<th' + (a ? ' align="' + a + '"' : '') + '>' +
-          renderInlineText(node.head[i], refs) + '</th>\n';
+          renderInlineText(node.head[i], refs, st) + '</th>\n';
       }
       s += '</tr>\n</thead>\n';
       if (node.rows.length > 0) {
@@ -2606,7 +2606,7 @@ function renderBlock(node, refs) {
             const a = node.aligns[i];
             const cell = i < row.length ? row[i] : '';
             s += '<td' + (a ? ' align="' + a + '"' : '') + '>' +
-              renderInlineText(cell, refs) + '</td>\n';
+              renderInlineText(cell, refs, st) + '</td>\n';
           }
           s += '</tr>\n';
         }
@@ -2619,7 +2619,7 @@ function renderBlock(node, refs) {
   }
 }
 
-function renderItem(item, tight, refs) {
+function renderItem(item, tight, refs, st) {
   const taskHtml = item.task === 'checked'
     ? '<input checked="" disabled="" type="checkbox"> '
     : item.task === 'unchecked'
@@ -2629,11 +2629,11 @@ function renderItem(item, tight, refs) {
   for (let i = 0; i < item.children.length; i++) {
     const child = item.children[i];
     if (child.t === 'p') {
-      const inner = renderInlineText(child.lines.join('\n'), refs);
+      const inner = renderInlineText(child.lines.join('\n'), refs, st);
       if (tight) s += (i === 0 ? taskHtml : '') + inner;
       else s += '<p>' + (i === 0 ? taskHtml : '') + inner + '</p>\n';
     } else {
-      s += renderBlock(child, refs);
+      s += renderBlock(child, refs, st);
     }
   }
   return s + '</li>\n';
@@ -2642,6 +2642,7 @@ function renderItem(item, tight, refs) {
 export function parse(markdown) {
   const { doc, refs } = parseBlocks(markdown);
   let out = '';
-  for (const child of doc.children) out += renderBlock(child, refs);
+  const docSt = { inLink: false, linkEmitted: false };
+  for (const child of doc.children) out += renderBlock(child, refs, docSt);
   return out;
 }
