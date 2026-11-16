@@ -382,7 +382,9 @@ function parseExtendedAutolink(src, p, kind, runStart) {
     const domEnd = emailDomainEnd(src, p + 1);
     if (domEnd < 0) return null;
     const text = src.slice(ls, domEnd);
-    return { href: 'mailto:' + text, text, end: domEnd, start: ls };
+    const href = cleanUrl('mailto:' + text);
+    if (href === null) return null;
+    return { href, text, end: domEnd, start: ls };
   }
   if (kind === 4) { // mailto: or xmpp: prefix
     const isXmpp = src.charCodeAt(p) === 120; // x
@@ -409,7 +411,9 @@ function parseExtendedAutolink(src, p, kind, runStart) {
     }
     const url = trimAutolinkUrl(src.slice(p, end));
     if (url.length === 0) return null;
-    return { href: url, text: url, end: p + url.length, start: p };
+    const href = cleanUrl(url);
+    if (href === null) return null;
+    return { href, text: url, end: p + url.length, start: p };
   }
   // www. or http(s)://
   const schemeEnd = kind === 1 ? p + 4 : src.indexOf('://', p) + 3;
@@ -432,7 +436,8 @@ function parseExtendedAutolink(src, p, kind, runStart) {
   }
   let url = trimAutolinkUrl(src.slice(p, end));
   if (url.length === 0) return null;
-  const href = kind === 1 ? 'http://' + url : url;
+  const href = cleanUrl(kind === 1 ? 'http://' + url : url);
+  if (href === null) return null;
   return { href, text: url, end: p + url.length, start: p };
 }
 
