@@ -342,6 +342,34 @@ function isBareEmailLocalChar(c) {
   return isAlnumCh(c) || c === 46 || c === 95 || c === 43 || c === 45;
 }
 
+// Length of the URL scheme (5 https, 4 http, 3 ftp) ending just before
+// `://` at index j, matching marked's [hH][tT][tT][pP][sS]?|[fF][tT][pP]
+// (case-insensitive per letter), or 0 when there is no scheme there.
+// The scheme must end exactly at j: `httpx://` is not a scheme, but
+// `xhttp://` is (the trigger is the `h`, the `x` stays text).
+function schemeLenBefore(src, j) {
+  const c = (k) => src.charCodeAt(k) | 32; // ASCII lowercase
+  if (j >= 5 && c(j - 5) === 104 && c(j - 4) === 116 && c(j - 3) === 116 && c(j - 2) === 112 && c(j - 1) === 115) return 5;
+  if (j >= 4 && c(j - 4) === 104 && c(j - 3) === 116 && c(j - 2) === 116 && c(j - 1) === 112) return 4;
+  if (j >= 3 && c(j - 3) === 102 && c(j - 2) === 116 && c(j - 1) === 112) return 3;
+  return 0;
+}
+
+// Earliest http/https/ftp trigger at or after i (and before end), or -1.
+function findSchemeTrigger(src, i, end) {
+  let j = src.indexOf('://', i);
+  while (j >= 0) {
+    const len = schemeLenBefore(src, j);
+    if (len > 0) {
+      const p = j - len;
+      if (p < end) return p;
+      return -1; // later :// can only start further right
+    }
+    j = src.indexOf('://', j + 3);
+  }
+  return -1;
+}
+
 // Try to parse an extended autolink starting at `p` (where a trigger was
 // found). `runStart` bounds the email local part's backward scan so it never
 // reaches past text already emitted. Returns {href, text, end} or null.
@@ -423,10 +451,8 @@ function scanTextRun(src, start, end, items, st) {
     let p = -1, kind = 0;
     const w = src.indexOf('www.', i);
     if (w >= 0 && w < end) { p = w; kind = 1; }
-    const h1 = src.indexOf('http://', i);
-    if (h1 >= 0 && h1 < end && (p < 0 || h1 < p)) { p = h1; kind = 2; }
-    const h2 = src.indexOf('https://', i);
-    if (h2 >= 0 && h2 < end && (p < 0 || h2 < p)) { p = h2; kind = 2; }
+    const h = findSchemeTrigger(src, i, end);
+    if (h >= 0 && (p < 0 || h < p)) { p = h; kind = 2; }
     const m1 = src.indexOf('mailto:', i);
     if (m1 >= 0 && m1 < end && (p < 0 || m1 < p)) { p = m1; kind = 4; }
     const m2 = src.indexOf('xmpp:', i);
@@ -1125,7 +1151,14 @@ function findEmClose(src, sp, L, Y, ch, refs) {
     if (next === b) {
       const end = codeSpanEnd(src, b);
       if (end > 0) { q = end; continue; }
-      q = b + 1;
+      // No code span starts at this run: skip the WHOLE run. A code
+      // span's opening must consume the full backtick run (its content
+      // starts with a non-backtick), so a code span can never start in
+      // the middle of a run — advancing by one would invent a span
+      // (e.g. `` ``pull` `` is not a span, `` ` note** ` `` is).
+      let r2 = 1;
+      while (b + r2 < n && src.charCodeAt(b + r2) === 96) r2++;
+      q = b + r2;
       continue;
     }
     if (next === l) {
@@ -1963,16 +1996,11 @@ function consumeFence(fence, getLine, rawLineAt, li, total) {
   let closed = false;
   while (j < total) {
     const line = getLine(j);
-    if (line !== null) {
-      if (closeRe.test(line)) { closed = true; break; }
-      out.push(fence.indent > 0 ? stripIndentCols(line, fence.indent) : line);
-      j++;
-      continue;
-    }
-    if (out.length === 0) break;
-    const raw = rawLineAt(j);
-    if (!isLazyLine(raw)) break;
-    out.push(raw);
+    // a line that does not belong to the open containers ends the fence;
+    // a fenced code block cannot be continued by a lazy line
+    if (line === null) break;
+    if (closeRe.test(line)) { closed = true; break; }
+    out.push(fence.indent > 0 ? stripIndentCols(line, fence.indent) : line);
     j++;
   }
   if (out.length > 0 && out[out.length - 1] === '') out.pop();
@@ -2232,9 +2260,10 @@ function parseBlocks(src) {
       // lazy continuation: judged on the line after the containers that
       // DID match are stripped, so "> bar" inside a triple quote is a
       // lazy "bar", while "> bar" at the top level starts a blockquote.
-      // A list-item line inside a list item is never lazy: it is a new
-      // item (even an empty one, or an ordered item not starting at 1).
-      const lazyListItem = para !== null && matchListItem(cur) !== null && para.parent.t === 'item';
+      // A list-item line is never a lazy continuation once the containers
+      // fail: it starts a new list (or a new item of an enclosing list),
+      // whatever its marker or start number.
+      const lazyListItem = para !== null && matchListItem(cur) !== null;
       if (para && !isBlankLine(cur) && !interruptsPara(cur) && !lazyListItem) {
         // lazy continuation of the paragraph; a leading run of 4+
         // columns of whitespace is stripped, shorter runs are kept.
