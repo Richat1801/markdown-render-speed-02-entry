@@ -2098,11 +2098,15 @@ function consumeFence(fence, getLine, rawLineAt, li, total, inQuote) {
     }
     // The line does not belong to the open containers. A fenced code
     // block directly in a blockquote ends there (a lazy line cannot
-    // continue it); directly in a list item or at the top level, a lazy
-    // line is code content (raw), while a block start ends the fence.
+    // continue it). In a list item (or at the top level), a lazy line is
+    // code content (raw) once the fence already has content — but if the
+    // FIRST content line does not belong, the fence is empty: the line
+    // is not code content and the fence ends there. A block start ends
+    // the fence in all cases.
     if (inQuote) break;
     const raw = rawLineAt(j);
     if (!isLazyLine(raw)) break;
+    if (out.length === 0) break;
     out.push(raw);
     j++;
   }
