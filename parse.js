@@ -2073,7 +2073,13 @@ function consumeHtmlBlock(first, getLine, rawLineAt, li, total, endsWithNewline)
     trailingNL = endsWithNewline;
   } else {
     const nextLine = getLine(j);
-    trailingNL = nextLine !== null && !isBlankLine(nextLine);
+    // marked's ge() keeps a single trailing newline but strips two or
+    // more. For types 1-5 the newline run after the block is 1 + the run
+    // of truly empty lines that follow (a whitespace-only line such as a
+    // lone tab breaks the run, so the newline stays). For types 6/7 the
+    // trailing blank-line pattern includes whitespace-only lines, so any
+    // blank next line strips the newline.
+    trailingNL = nextLine !== null && (type <= 5 ? nextLine !== '' : !isBlankLine(nextLine));
   }
   let text = blockLines.join('\n');
   if (trailingNL) text += '\n';
