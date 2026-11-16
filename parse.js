@@ -217,14 +217,14 @@ const INLINE_SPECIAL_G = /[\\`*_\[!<&~\n]/g;
 // Delimiter kinds
 const D_EM = 1, D_STRONG = 2, D_DEL = 3;
 
-function parseInline(src, refs) {
+function parseInline(src, refs, st) {
   const n = src.length;
   if (n === 0) return '';
   if (src.indexOf('www.') < 0 && src.indexOf('://') < 0 && src.indexOf('@') < 0 &&
       !INLINE_SPECIAL.test(src)) {
     return escapeText(src);
   }
-  return parseInlineSlow(src, refs);
+  return parseInlineSlow(src, refs, st || { inLink: false, linkEmitted: false });
 }
 
 // --- autolink helpers ---
@@ -385,8 +385,14 @@ function parseExtendedAutolink(src, p, kind, runStart) {
 // Scan a text run [start, end) for extended autolinks, emitting text/link
 // items. Returns the new position (may exceed `end` when a URL runs past
 // the next special character).
-function scanTextRun(src, start, end, items) {
+function scanTextRun(src, start, end, items, st) {
   let i = start;
+  // Inside a link, extended autolinks are suppressed (marked's url
+  // tokenizer is skipped while state.inLink is set).
+  if (st && st.inLink) {
+    if (i < end) items.push(escapeText(src.slice(i, end)));
+    return end;
+  }
   while (i < end) {
     let p = -1, kind = 0;
     const w = src.indexOf('www.', i);
@@ -429,16 +435,43 @@ function skipInlineWS(src, j) {
   return j;
 }
 
-// Find the matching ] for a [ at position i (depth counts nested [ ]).
-// Returns the index of ] or -1.
+// Find the matching ] for a [ at position i. Returns the index of ] or -1.
+// Mirrors marked's label pattern: a backtick run starts a code span (the
+// closing run may be any length), a run of 2+ backticks just before ] is a
+// unit of its own, and brackets nest at most two levels deep.
 function findLinkEnd(src, i) {
   const n = src.length;
   let depth = 1;
   for (let j = i + 1; j < n; j++) {
     const c = src.charCodeAt(j);
     if (c === 92) { j++; continue; }
-    if (c === 91) depth++;
-    else if (c === 93) {
+    if (c === 96) { // backtick run
+      let run = 1;
+      while (j + run < n && src.charCodeAt(j + run) === 96) run++;
+      if (run >= 2 && j + run < n && src.charCodeAt(j + run) === 93) {
+        j += run - 1; // ``+(?=]) unit: the ] closes the label
+        continue;
+      }
+      // find the closing run (any length, maximal)
+      let k = j + run;
+      let end = -1;
+      while (k < n) {
+        if (src.charCodeAt(k) === 96) {
+          let r2 = 1;
+          while (k + r2 < n && src.charCodeAt(k + r2) === 96) r2++;
+          end = k + r2;
+          break;
+        }
+        k++;
+      }
+      if (end < 0) return -1; // unclosed code span: the label cannot close
+      j = end - 1;
+      continue;
+    }
+    if (c === 91) {
+      if (depth === 3) return -1;
+      depth++;
+    } else if (c === 93) {
       depth--;
       if (depth === 0) return j;
     }
@@ -499,6 +532,7 @@ function parseInlineLinkTail(src, i) {
       const c = src.charCodeAt(k);
       if (c === 62) { ok = true; break; }
       if (c === 10 || c === 60) break;
+      if (c === 92 && k + 1 < n) { k += 2; continue; } // \> is not the end
       k++;
     }
     if (!ok) return null;
@@ -518,8 +552,13 @@ function parseInlineLinkTail(src, i) {
       }
       k++;
     }
-    if (k === j || depth !== 0) return null;
-    dest = unescapeBackslashes(src.slice(j, k));
+    if (k === j) {
+      // empty destination: () is a valid inline link
+      dest = '';
+    } else {
+      if (depth !== 0) return null;
+      dest = unescapeBackslashes(src.slice(j, k));
+    }
     j = k;
   }
   let title = null;
@@ -539,7 +578,62 @@ function parseInlineLinkTail(src, i) {
 }
 
 function normalizeLabel(s) {
-  return s.replace(/\s+/g, ' ').trim().toLowerCase();
+  // Unicode case folding: ß/ẞ fold to "ss" (toLowerCase leaves ß as ß)
+  return s.replace(/\s+/g, ' ').trim().toLowerCase().replace(/ß/g, 'ss');
+}
+
+// End of an autolink <...> starting at src[i], or -1. The inner text must
+// have no whitespace or '<' and be a scheme (2-32 chars) or an email.
+function autolinkExtent(src, i) {
+  const n = src.length;
+  const gt = src.indexOf('>', i + 1);
+  if (gt < 0 || gt - i > 200) return -1;
+  const inner = src.slice(i + 1, gt);
+  if (/[\s<]/.test(inner)) return -1;
+  const colon = inner.indexOf(':');
+  if (colon >= 2 && colon <= 32) {
+    let ok = isAlphaCh(inner.charCodeAt(0));
+    for (let k = 1; ok && k < colon; k++) {
+      const c = inner.charCodeAt(k);
+      if (!isAlnumCh(c) && c !== 43 && c !== 46 && c !== 45) ok = false;
+    }
+    if (ok) return gt + 1;
+  }
+  const at = inner.indexOf('@');
+  if (at > 0) {
+    let okLocal = true;
+    for (let k = 0; k < at; k++) {
+      if (!isEmailLocalChar(inner.charCodeAt(k))) { okLocal = false; break; }
+    }
+    if (okLocal) {
+      const domEnd = emailDomainEnd(inner, at + 1);
+      if (domEnd === inner.length) return gt + 1;
+    }
+  }
+  return -1;
+}
+
+// Marked's Be(): does the label [start..close] contain a '<' that starts an
+// inline tag or autolink whose match extends past the end of the label?
+// If so the link is aborted.
+function labelHasRunawayTag(src, start, close) {
+  for (let s = start + 1; s < close; s++) {
+    const c = src.charCodeAt(s);
+    if (c === 92) { s++; continue; }
+    if (c === 96) {
+      const end = codeSpanEnd(src, s);
+      if (end > 0) { s = end - 1; continue; }
+      continue;
+    }
+    if (c !== 60) continue; // <
+    const end = matchInlineHtml(src, s);
+    if (end && end.end > close) return true;
+    const ae = autolinkExtent(src, s);
+    if (ae > 0 && ae > close) return true;
+    if (end) s = end.end - 1;
+    else if (ae > 0) s = ae - 1;
+  }
+  return false;
 }
 
 function lookupRef(refs, label) {
@@ -566,11 +660,30 @@ function renderImage(href, title, altText) {
 // Try to parse a link or image starting at src[i] ('[' or '![').
 // On success pushes the rendered HTML to items and returns the new index.
 // On failure returns -1 (caller emits the '[' or '!' literally).
-function tryParseLink(src, i, isImage, refs, items) {
+// Try to parse a link/image starting at src[i] ('[' or '![').
+// Returns the end index, or -1 when no link forms. `st` carries marked's
+// lexer state: while a link's text is parsed, inLink is set (extended
+// autolinks suppressed) and linkEmitted records whether a link formed
+// inside; a non-image link whose text contains a link is aborted.
+function tryParseLink(src, i, isImage, refs, items, st) {
   const start = isImage ? i + 1 : i;
   const close = findLinkEnd(src, start);
   if (close < 0) return -1;
   const text = src.slice(start + 1, close);
+  // Be(): a tag/autolink inside the label that runs past the label aborts
+  if (labelHasRunawayTag(src, start, close)) return -1;
+  // Parse the link text the way marked's De() does: inLink set, linkEmitted
+  // cleared, then restored; a nested link aborts a non-image outer link.
+  const parseText = () => {
+    const savedInLink = st.inLink, savedEmitted = st.linkEmitted;
+    st.inLink = true;
+    st.linkEmitted = false;
+    const inner = parseInline(text, refs, st);
+    const nested = st.linkEmitted;
+    st.inLink = savedInLink;
+    st.linkEmitted = savedEmitted;
+    return { inner, nested };
+  };
   let j = close + 1;
   // inline link ( ... )
   if (j < src.length && src.charCodeAt(j) === 40) {
@@ -578,7 +691,7 @@ function tryParseLink(src, i, isImage, refs, items) {
     if (tail) {
       const href = cleanUrl(tail.dest);
       if (isImage) {
-        const alt = stripTags(parseInline(text, refs));
+        const alt = stripTags(parseText().inner);
         if (href === null) {
           items.push(escapeText(alt));
         } else {
@@ -586,7 +699,9 @@ function tryParseLink(src, i, isImage, refs, items) {
         }
         return tail.end;
       }
-      const inner = parseInline(text, refs);
+      const { inner, nested } = parseText();
+      if (nested) return -1;
+      st.linkEmitted = true;
       if (href === null) items.push(inner);
       else items.push(renderLink(href, tail.title, inner));
       return tail.end;
@@ -601,8 +716,12 @@ function tryParseLink(src, i, isImage, refs, items) {
     } else {
       const close2 = findLinkEnd(src, j);
       if (close2 >= 0) {
-        ref = lookupRef(refs, src.slice(j + 1, close2));
-        if (ref) j = close2 + 1;
+        const refLabel = src.slice(j + 1, close2);
+        // ref labels may not contain unescaped [ or ]
+        if (!hasUnescapedBracket(refLabel)) {
+          ref = lookupRef(refs, refLabel);
+          if (ref) j = close2 + 1;
+        }
       }
     }
   } else {
@@ -610,12 +729,14 @@ function tryParseLink(src, i, isImage, refs, items) {
   }
   if (ref) {
     if (isImage) {
-      const alt = stripTags(parseInline(text, refs));
+      const alt = stripTags(parseText().inner);
       const href = cleanUrl(ref.dest);
       if (href === null) items.push(escapeText(alt));
       else items.push(renderImage(href, ref.title, escapeText(alt)));
     } else {
-      const inner = parseInline(text, refs);
+      const { inner, nested } = parseText();
+      if (nested) return -1;
+      st.linkEmitted = true;
       const href = cleanUrl(ref.dest);
       if (href === null) items.push(inner);
       else items.push(renderLink(href, ref.title, inner));
@@ -625,7 +746,19 @@ function tryParseLink(src, i, isImage, refs, items) {
   return -1;
 }
 
-// Remove <...> tags from a string (for image alt text).
+// Does s contain an unescaped [ or ]?
+function hasUnescapedBracket(s) {
+  for (let k = 0; k < s.length; k++) {
+    const c = s.charCodeAt(k);
+    if (c === 92) { k++; continue; }
+    if (c === 91 || c === 93) return true;
+  }
+  return false;
+}
+
+// Remove <...> tags from a string (for image alt text). An <img> tag
+// contributes its alt attribute value (marked re-renders alt text with a
+// text renderer, so a nested image yields its alt text, not nothing).
 function stripTags(s) {
   let out = '';
   let i = 0;
@@ -634,7 +767,15 @@ function stripTags(s) {
     const c = s.charCodeAt(i);
     if (c === 60) { // <
       const gt = s.indexOf('>', i + 1);
-      if (gt >= 0) { i = gt + 1; continue; }
+      if (gt >= 0) {
+        const tag = s.slice(i, gt + 1);
+        if (tag.startsWith('<img ')) {
+          const m = / alt="([^"]*)"/.exec(tag);
+          if (m) out += decodeAltEntities(m[1]);
+        }
+        i = gt + 1;
+        continue;
+      }
     }
     out += s[i];
     i++;
@@ -642,11 +783,31 @@ function stripTags(s) {
   return out;
 }
 
+// Decode the entities escapeText produces (&amp; &lt; &gt; &quot;) plus
+// numeric character references, so an alt value taken out of rendered HTML
+// is not double-escaped when it is escaped again.
+function decodeAltEntities(s) {
+  return s.replace(/&(#x[0-9a-fA-F]+|#\d+|amp|lt|gt|quot|#39);/g, (m, e) => {
+    if (e === 'amp') return '&';
+    if (e === 'lt') return '<';
+    if (e === 'gt') return '>';
+    if (e === 'quot') return '"';
+    if (e === '#39') return "'";
+    if (e[0] === '#') {
+      const code = e[1] === 'x' || e[1] === 'X'
+        ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return code > 0 && code < 0x110000 ? String.fromCodePoint(code) : m;
+    }
+    return m;
+  });
+}
+
 // --- autolinks and inline HTML ---
 
 // Try to parse an autolink <...> or inline HTML starting at src[i] === '<'.
-// Returns {html, end} or null (caller emits '&lt;').
-function parseAngle(src, i, items) {
+// Returns {html, end} or null (caller emits '&lt;'). A start <a> tag sets
+// st.inLink, a </a> tag clears it (marked's tag tokenizer).
+function parseAngle(src, i, items, st) {
   const n = src.length;
   // autolink: <scheme:...> or <email>
   const gt = src.indexOf('>', i + 1);
@@ -692,6 +853,10 @@ function parseAngle(src, i, items) {
   // open tag, closing tag
   const html = matchInlineHtml(src, i);
   if (html) {
+    if (st) {
+      if (!st.inLink && /^<a[ >]/i.test(html.text)) st.inLink = true;
+      else if (st.inLink && /^<\/a\s*>/i.test(html.text)) st.inLink = false;
+    }
     items.push(html.text);
     return html.end;
   }
@@ -1000,7 +1165,7 @@ function parseCodeSpan(src, sp, items) {
   return found + run;
 }
 
-function parseInlineSlow(src, refs) {
+function parseInlineSlow(src, refs, st) {
   const n = src.length;
   const items = [];
   const re = INLINE_SPECIAL_G;
@@ -1009,7 +1174,7 @@ function parseInlineSlow(src, refs) {
   let m = re.exec(src);
   while (true) {
     const sp = m ? m.index : n;
-    pos = scanTextRun(src, pos, sp, items);
+    pos = scanTextRun(src, pos, sp, items, st);
     if (!m) break;
     const c = src.charCodeAt(sp);
     if (c === 92) { // backslash
@@ -1042,7 +1207,7 @@ function parseInlineSlow(src, refs) {
           const strip = close.strong ? 2 : 1;
           const inner = src.slice(sp + strip, close.innerEnd - strip);
           items.push((close.strong ? '<strong>' : '<em>') +
-            parseInline(inner, refs) +
+            parseInline(inner, refs, st) +
             (close.strong ? '</strong>' : '</em>'));
           pos = close.innerEnd;
           done = true;
@@ -1056,24 +1221,24 @@ function parseInlineSlow(src, refs) {
       DEL_RE.lastIndex = sp;
       const dm = DEL_RE.exec(src);
       if (dm) {
-        items.push('<del>' + parseInline(dm[2], refs) + '</del>');
+        items.push('<del>' + parseInline(dm[2], refs, st) + '</del>');
         pos = sp + dm[0].length;
       } else {
         items.push('~');
         pos = sp + 1;
       }
     } else if (c === 91) { // [
-      const r = tryParseLink(src, sp, false, refs, items);
+      const r = tryParseLink(src, sp, false, refs, items, st);
       if (r < 0) { items.push('['); pos = sp + 1; }
       else pos = r;
     } else if (c === 33) { // !
       if (sp + 1 < n && src.charCodeAt(sp + 1) === 91) {
-        const r = tryParseLink(src, sp, true, refs, items);
+        const r = tryParseLink(src, sp, true, refs, items, st);
         if (r < 0) { items.push('!'); pos = sp + 1; }
         else pos = r;
       } else { items.push('!'); pos = sp + 1; }
     } else if (c === 60) { // <
-      const r = parseAngle(src, sp, items);
+      const r = parseAngle(src, sp, items, st);
       if (r < 0) { items.push('&lt;'); pos = sp + 1; }
       else pos = r;
     } else if (c === 38) { // &
@@ -1498,6 +1663,8 @@ function parseRefDef(lines, idx) {
   if (close < 0) return null;
   const label = line.slice(i + 1, close);
   if (label.length === 0 || label.length > 999) return null;
+  // ref labels may not contain unescaped [ or ] (marked's `le` pattern)
+  if (hasUnescapedBracket(label)) return null;
   let j = skipWSOnLine(line, close + 1);
   if (j >= line.length || line.charCodeAt(j) !== 58) return null;
   j++;
