@@ -1154,6 +1154,10 @@ function findEmClose(src, sp, L, Y, ch, refs) {
     if (t >= 0 && (next < 0 || t < next)) next = t;
     if (next < 0) return null;
     if (next === b) {
+      // An escaped backtick is a literal character, not a code-span
+      // opener (marked's masking hides it via the escape rule). Skip
+      // just it; any remaining backticks in the run are re-found next.
+      if (isEscaped(src, b)) { q = b + 1; continue; }
       const end = codeSpanEnd(src, b);
       if (end > 0) { q = end; continue; }
       // No code span starts at this run: skip the WHOLE run. A code
@@ -1228,6 +1232,9 @@ function findDelClose(src, sp, o, refs) {
     if (t >= 0 && (next < 0 || t < next)) next = t;
     if (next < 0) return null;
     if (next === b) {
+      // An escaped backtick is a literal character, not a code-span
+      // opener (marked's masking hides it via the escape rule).
+      if (isEscaped(src, b)) { q = b + 1; continue; }
       const end = codeSpanEnd(src, b);
       if (end > 0) { q = end; continue; }
       let r2 = 1;
