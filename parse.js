@@ -1201,10 +1201,73 @@ function findEmClose(src, sp, L, Y, ch, refs) {
   return null;
 }
 
-// Strikethrough, marked's del rule: one or two tildes, content not
-// starting/ending with space or tilde, closer of the same length, and the
-// character after the closer is not a tilde.
-const DEL_RE = /(~~?)(?=[^\s~])((?:\\[\s\S]|[^\\])*?(?:\\[\s\S]|[^\s~\\]))\1(?=[^~]|$)/y;
+// Find the closing tilde run for a strikethrough opener of length `o`
+// (1 or 2) at src[sp], opener-driven like marked's del: scan for `~`
+// runs (skipping code spans, links and HTML tags), counting opener-like
+// runs up and closer-like runs down; a run only counts when its length
+// equals the opener length (a longer run contributes its first `o`
+// tildes, the rest is re-scanned). Both-flanking runs count as closers
+// (there is no rule of three for del). Returns {innerEnd} or null.
+function findDelClose(src, sp, o, refs) {
+  const n = src.length;
+  let p = o;
+  let q = sp + o;
+  while (q < n) {
+    let r = src.indexOf('~', q);
+    let b = src.indexOf('`', q);
+    let l = src.indexOf('[', q);
+    let t = src.indexOf('<', q);
+    let next = r;
+    if (b >= 0 && (next < 0 || b < next)) next = b;
+    if (l >= 0 && (next < 0 || l < next)) next = l;
+    if (t >= 0 && (next < 0 || t < next)) next = t;
+    if (next < 0) return null;
+    if (next === b) {
+      const end = codeSpanEnd(src, b);
+      if (end > 0) { q = end; continue; }
+      let r2 = 1;
+      while (b + r2 < n && src.charCodeAt(b + r2) === 96) r2++;
+      q = b + r2;
+      continue;
+    }
+    if (next === l) {
+      const isImg = l > 0 && src.charCodeAt(l - 1) === 33;
+      const end = linkExtent(src, isImg ? l - 1 : l, isImg, refs);
+      if (end > 0) { q = end; continue; }
+      q = l + 1;
+      continue;
+    }
+    if (next === t) {
+      const end = htmlExtent(src, t);
+      if (end > 0) { q = end; continue; }
+      q = t + 1;
+      continue;
+    }
+    let run = 1;
+    while (r + run < n && src.charCodeAt(r + run) === 126) run++;
+    if (isEscaped(src, r)) {
+      if (run === 1) { q = r + 1; continue; }
+      r++;
+      run--;
+    }
+    // Marked's del closer regex matches at most two tildes and its
+    // lookaheads forbid a tilde right after the match, so a run of
+    // three or more is invisible to the scan, and a run whose length
+    // differs from the opener is skipped whole (never split: `~~` is
+    // not a `~` closer).
+    if (run > 2 || run !== o) { q = r + run; continue; }
+    const fl = delimFlanking(src, r, run, 126);
+    if (fl.canOpen && !fl.canClose) { p += run; q = r + run; continue; }
+    if (fl.canClose) {
+      p -= run;
+      if (p <= 0) return { innerEnd: r + run };
+      q = r + run;
+      continue;
+    }
+    q = r + run;
+  }
+  return null;
+}
 
 // Parse a code span starting at src[sp] === '`'. Pushes the rendered
 // <code>...</code> (or literal backticks) and returns the new index.
@@ -1321,13 +1384,23 @@ function parseInlineSlow(src, refs, st) {
         items.push(String.fromCharCode(c));
         pos = sp + 1;
       }
-    } else if (c === 126) { // ~ : strikethrough
-      DEL_RE.lastIndex = sp;
-      const dm = DEL_RE.exec(src);
-      if (dm) {
-        items.push('<del>' + parseInline(dm[2], refs, st) + '</del>');
-        pos = sp + dm[0].length;
-      } else {
+    } else if (c === 126) { // ~ : strikethrough, opener-driven like marked's del
+      let runEnd = sp;
+      while (runEnd < n && src.charCodeAt(runEnd) === 126) runEnd++;
+      const run = runEnd - sp;
+      let done = false;
+      // the opener is one or two tildes; a run of three or more cannot
+      // open here (the char after two tildes would be a tilde)
+      if (run <= 2 && delimFlanking(src, sp, run, 126).canOpen) {
+        const close = findDelClose(src, sp, run, refs);
+        if (close) {
+          const inner = src.slice(sp + run, close.innerEnd - run);
+          items.push('<del>' + parseInline(inner, refs, st) + '</del>');
+          pos = close.innerEnd;
+          done = true;
+        }
+      }
+      if (!done) {
         items.push('~');
         pos = sp + 1;
       }
@@ -1988,7 +2061,7 @@ function consumeHtmlBlock(first, getLine, rawLineAt, li, total, endsWithNewline)
 // The first content line must match the containers; later lines may be
 // lazy lines. The closing fence must match the containers. One trailing
 // blank content line is dropped (it is the line ending before the fence).
-function consumeFence(fence, getLine, rawLineAt, li, total) {
+function consumeFence(fence, getLine, rawLineAt, li, total, inQuote) {
   let j = li + 1;
   const closeRe = new RegExp(
     '^ {0,3}' + (fence.ch === 96 ? '`' : '~') + '{' + fence.len + ',}[ \\t]*$');
@@ -1996,11 +2069,20 @@ function consumeFence(fence, getLine, rawLineAt, li, total) {
   let closed = false;
   while (j < total) {
     const line = getLine(j);
-    // a line that does not belong to the open containers ends the fence;
-    // a fenced code block cannot be continued by a lazy line
-    if (line === null) break;
-    if (closeRe.test(line)) { closed = true; break; }
-    out.push(fence.indent > 0 ? stripIndentCols(line, fence.indent) : line);
+    if (line !== null) {
+      if (closeRe.test(line)) { closed = true; break; }
+      out.push(fence.indent > 0 ? stripIndentCols(line, fence.indent) : line);
+      j++;
+      continue;
+    }
+    // The line does not belong to the open containers. A fenced code
+    // block directly in a blockquote ends there (a lazy line cannot
+    // continue it); directly in a list item or at the top level, a lazy
+    // line is code content (raw), while a block start ends the fence.
+    if (inQuote) break;
+    const raw = rawLineAt(j);
+    if (!isLazyLine(raw)) break;
+    out.push(raw);
     j++;
   }
   if (out.length > 0 && out[out.length - 1] === '') out.pop();
@@ -2349,7 +2431,7 @@ function parseBlocks(src) {
         const fence = matchFence(cur2);
         if (fence) {
           closePara();
-          const f = consumeFence(fence, getLine, rawLineAt, li, total);
+          const f = consumeFence(fence, getLine, rawLineAt, li, total, container().t === 'quote');
           addBlock({ t: 'code', info: fence.info, lines: f.lines, fenced: true });
           li = f.next - 1;
           break;
@@ -2392,7 +2474,7 @@ function parseBlocks(src) {
         if (atx) { addBlock({ t: 'h', level: atx.level, lines: [atx.content] }); break; }
         const fence = matchFence(cur2);
         if (fence) {
-          const f = consumeFence(fence, getLine, rawLineAt, li, total);
+          const f = consumeFence(fence, getLine, rawLineAt, li, total, container().t === 'quote');
           addBlock({ t: 'code', info: fence.info, lines: f.lines, fenced: true });
           li = f.next - 1;
           break;
